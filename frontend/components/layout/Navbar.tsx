@@ -33,7 +33,7 @@ function SearchInput() {
 
 export function Navbar() {
     return (
-        <header className="sticky top-0 z-50 w-full glass-dark px-6 lg:px-20 py-4">
+        <header className="sticky top-0 z-50 w-full bg-slate-950 border-b border-white/10 shadow-lg shadow-black/40 px-6 lg:px-20 py-4">
             <div className="mx-auto flex max-w-7xl items-center justify-between">
                 <div className="flex items-center gap-10">
                     <Link href="/" className="flex items-center gap-3">
