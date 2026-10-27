@@ -48,12 +48,6 @@ export function Navbar() {
                         <Link href="/" className={`text-sm font-medium transition-colors ${pathname === "/" ? "text-white" : "text-slate-400 hover:text-white"}`}>
                             Projects
                         </Link>
-                        <Link href="/create" className={`text-sm font-medium transition-colors ${pathname === "/create" ? "text-white" : "text-slate-400 hover:text-white"}`}>
-                            Create
-                        </Link>
-                        <Link href="/settings" className={`text-sm font-medium transition-colors ${pathname === "/settings" ? "text-white" : "text-slate-400 hover:text-white"}`}>
-                            Settings
-                        </Link>
                     </nav>
                 </div>
 
