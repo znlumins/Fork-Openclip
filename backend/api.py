@@ -353,14 +353,24 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
             filename = os.path.basename(clip["file_path"])
             file_url = f"/files/{project_id}/clips/{filename}"
 
+            title_clip = clip.get('title', '')
+            reason_clip = clip.get('reason', '')
             raw_desc = suggestion.get("description")
             if not raw_desc:
-                raw_desc = f"{clip.get('title', '')}\n\n{clip.get('reason', '')}"
+                raw_desc = f"{title_clip}\n\n{reason_clip}".strip() if reason_clip else title_clip
+
+            cta_text = "Gimana menurut kalian? Tulis pendapat kalian di kolom komentar ya! 👇"
+
             tags_list = suggestion.get("hashtags", [])
-            ht_clean = [h if h.startswith("#") else f"#{h}" for h in tags_list] if tags_list else ["#shorts", "#reels", "#fyp", "#viral"]
+            ht_clean = [h if h.startswith("#") else f"#{h}" for h in tags_list] if tags_list else ["#shorts", "#reels", "#tiktok", "#fyp", "#viral", "#foryou"]
             hashtags_str = " ".join(ht_clean)
-            credit_line = f"🎥 Credit Video: {title}\n🔗 Source: {youtube_url}"
-            full_social_description = f"{raw_desc.strip()}\n\n---\n{credit_line}\n\n{hashtags_str}"
+
+            credit_line = (
+                f"🎥 Sumber Video Asli: {title}\n"
+                f"🔗 Tonton Video Lengkapnya: {youtube_url}\n"
+                f"📌 Hak Cipta & Materi Sepenuhnya Milik Pembuat Video Asli."
+            )
+            full_social_description = f"{raw_desc.strip()}\n\n{cta_text}\n\n---\n{credit_line}\n\n{hashtags_str}"
 
             await database.save_clip(
                 project_id=project_id,

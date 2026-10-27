@@ -275,7 +275,7 @@ def _build_chunk_prompt(chunk: list[dict], chunk_index: int, total_chunks: int) 
     chunk_start = chunk[0]["start"] if chunk else 0
     chunk_end = chunk[-1]["end"] if chunk else 0
 
-    return f"""You are a viral video editor.
+    return f"""You are an expert viral video editor and content creator for social media platforms (YouTube Shorts, TikTok, Instagram Reels) targeting Indonesian audiences.
 This is part {chunk_index+1} of {total_chunks} of a YouTube video transcript.
 This section covers timestamps from {chunk_start:.0f}s to {chunk_end:.0f}s.
 
@@ -285,12 +285,15 @@ Rules:
 - Each clip MUST be between 60 and 80 seconds long. This is STRICT — no shorter, no longer.
 - Clips MUST stay within this section's bounds: {chunk_start:.0f}s to {chunk_end:.0f}s
 - Must start and end at natural speech boundaries
-- Only pick genuinely strong moments
+- Only pick genuinely strong, engaging, high-retention moments
 - You MUST return at least 2-3 clips for this section so we have enough options
 - Make sure "start" and "end" are float numbers of seconds
-- Generate a catchy, clickbait-style title for each clip (max 8 words)
-- Generate 3-5 relevant hashtags for social media (e.g. #motivation #viral)
-- Generate 3-5 SEO tags/keywords (single words or short phrases)
+
+ATURAN BAHASA INDONESIA (SANGAT PENTING & WAJIB):
+- "title": Wajib dalam BAHASA INDONESIA. Buat judul/hook yang sangat memikat, clickbait cerdas, dan memicu rasa penasaran tinggi (maksimal 6-8 kata). Gunakan gaya bahasa viral Shorts/TikTok Indonesia (contoh: "Gak Nyangka Rahasia Ini Baru Kebongkar!", "Momen Bikin Merinding Semua Orang", "Cara Licik Otak Bikin Kita Malas").
+- "reason": Wajib dalam BAHASA INDONESIA (1-2 kalimat ringkas). Tulis alasan/ringkasan menarik mengapa momen ini sangat layak ditonton dan memancing interaksi penonton.
+- "hashtags": Generate 3-5 hashtag relevan dalam Bahasa Indonesia & universal (contoh: ["#shorts", "#fyp", "#faktamenarik", "#podcastindonesia", "#viral"]).
+- "tags": Generate 3-5 kata kunci SEO dalam Bahasa Indonesia.
 
 TRANSCRIPT SECTION:
 {_format_transcript(chunk)}
@@ -300,8 +303,8 @@ Return ONLY JSON array:
   {{
     "start": <float seconds>,
     "end": <float seconds>,
-    "title": "<catchy clickbait title, max 8 words>",
-    "reason": "<one sentence>",
+    "title": "<judul viral Bahasa Indonesia, max 8 kata>",
+    "reason": "<alasan/ringkasan menarik Bahasa Indonesia, 1-2 kalimat>",
     "viral_score": <1-10>,
     "hashtags": ["#tag1", "#tag2", "#tag3"],
     "tags": ["keyword1", "keyword2", "keyword3"]
@@ -311,7 +314,7 @@ If no strong moments found return: []"""
 
 
 def _build_reduce_prompt(candidates: list[dict]) -> str:
-    return f"""You are a viral video editor.
+    return f"""You are an expert viral video editor for Indonesian audiences (TikTok, YouTube Shorts, Instagram Reels).
 Below are candidate clip moments found across a YouTube video.
 Select the best clips for maximum viral potential.
 
@@ -325,15 +328,16 @@ Rules:
 - Sort by start time ascending
 - "start" and "end" must be float numbers of seconds
 - Adjust start/end timestamps if needed to ensure each clip is 60-80 seconds
-- Keep the existing title, reason, viral_score, hashtags, and tags from candidates
+- BAHASA INDONESIA: Pastikan "title" dan "reason" menggunakan Bahasa Indonesia yang memikat, menarik, dan siap posting!
+- Keep or refine the existing title, reason, viral_score, hashtags, and tags in Bahasa Indonesia.
 
 Return ONLY the selected candidates as JSON array in the exact same format. Do not remove any fields.
 [
   {{
     "start": <float seconds>,
     "end": <float seconds>,
-    "title": "<catchy clickbait title, max 8 words>",
-    "reason": "<one sentence>",
+    "title": "<judul/hook viral Bahasa Indonesia, max 8 kata>",
+    "reason": "<alasan/ringkasan menarik Bahasa Indonesia, 1-2 kalimat>",
     "viral_score": <1-10>,
     "hashtags": ["#tag1", "#tag2", "#tag3"],
     "tags": ["keyword1", "keyword2", "keyword3"]

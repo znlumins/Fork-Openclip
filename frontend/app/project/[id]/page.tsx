@@ -37,6 +37,11 @@ export default function ProjectPage() {
     const [wsProgress, setWsProgress] = useState<{ stage: string; percent: number; message: string } | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [copiedField, setCopiedField] = useState<string | null>(null);
+    const [customTitle, setCustomTitle] = useState<Record<string, string>>({});
+    const [customDesc, setCustomDesc] = useState<Record<string, string>>({});
+
+    const currentTitle = selectedClip ? (customTitle[selectedClip.id] !== undefined ? customTitle[selectedClip.id] : (selectedClip.title || "")) : "";
+    const currentDesc = selectedClip ? (customDesc[selectedClip.id] !== undefined ? customDesc[selectedClip.id] : (selectedClip.description || "")) : "";
 
     const handleCopy = (text: string, field: string) => {
         if (!text) return;
@@ -250,36 +255,44 @@ export default function ProjectPage() {
                         {/* Title Copy */}
                         <div className="space-y-1.5">
                             <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Judul / Hook Video</label>
+                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Judul / Hook Video (Bahasa Indonesia)</label>
                                 <button
-                                    onClick={() => handleCopy(selectedClip.title || "", "title")}
+                                    onClick={() => handleCopy(currentTitle, "title")}
                                     className="text-xs font-bold text-primary hover:text-white flex items-center gap-1 transition-colors"
                                 >
                                     {copiedField === "title" ? "✓ Tersalin!" : "📋 Salin Judul"}
                                 </button>
                             </div>
-                            <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl text-slate-100 text-sm font-semibold flex items-center justify-between">
-                                <span>{selectedClip.title || "Untitled Clip"}</span>
-                            </div>
+                            <input
+                                type="text"
+                                value={currentTitle}
+                                onChange={(e) => selectedClip && setCustomTitle(prev => ({ ...prev, [selectedClip.id]: e.target.value }))}
+                                className="w-full p-3 bg-slate-900/80 border border-slate-800 focus:border-primary/50 rounded-xl text-slate-100 text-sm font-semibold focus:outline-none transition-colors"
+                                placeholder="Judul / Hook Video..."
+                            />
                         </div>
 
                         {/* Description & Credit Copy */}
                         <div className="space-y-1.5">
                             <div className="flex items-center justify-between">
-                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Deskripsi & Credit Video</label>
+                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Deskripsi & Credit Video (Bahasa Indonesia)</label>
                                 <button
-                                    onClick={() => handleCopy(selectedClip.description || "", "desc")}
+                                    onClick={() => handleCopy(currentDesc, "desc")}
                                     className="px-3.5 py-1.5 rounded-lg bg-primary hover:bg-primary/90 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-md glow-primary"
                                 >
                                     {copiedField === "desc" ? "✓ Berhasil Disalin!" : "📋 Salin Deskripsi & Credit"}
                                 </button>
                             </div>
                             <textarea
-                                readOnly
-                                rows={5}
-                                value={selectedClip.description || ""}
-                                className="w-full bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 text-slate-200 text-xs font-mono leading-relaxed focus:outline-none custom-scrollbar resize-none"
+                                rows={6}
+                                value={currentDesc}
+                                onChange={(e) => selectedClip && setCustomDesc(prev => ({ ...prev, [selectedClip.id]: e.target.value }))}
+                                className="w-full bg-slate-900/80 border border-slate-800 focus:border-primary/50 rounded-xl p-3.5 text-slate-200 text-xs font-mono leading-relaxed focus:outline-none custom-scrollbar resize-y transition-colors"
+                                placeholder="Deskripsi & Credit Video..."
                             />
+                            <p className="text-[11px] text-slate-500">
+                                💡 Format otomatis Bahasa Indonesia dengan ajakan interaksi & credit pembuat asli. Bisa diedit langsung sebelum disalin.
+                            </p>
                         </div>
 
                         {/* Hashtags Chips */}
