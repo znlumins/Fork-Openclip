@@ -355,9 +355,27 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
 
             title_clip = clip.get('title', '')
             reason_clip = clip.get('reason', '')
+
+            # Pastikan teks deskripsi dan alasan selalu dalam Bahasa Indonesia
+            common_en_replacements = [
+                (r"^The speaker opens with a shocking statement about", "Membongkar fakta mengejutkan tentang"),
+                (r"^The speaker (captivatingly|explains|discusses|shows|reveals|talks about)", "Membahas"),
+                (r"^A fascinating psychological explanation of how", "Penjelasan psikologis menarik tentang bagaimana"),
+                (r"^Explains how", "Menjelaskan bagaimana"),
+                (r"^Explains that", "Menjelaskan bahwa"),
+                (r"^Exposes how", "Membongkar bagaimana"),
+                (r"\bwar-torn countries\b", "negara konflik"),
+                (r"\bdoom scrolling\b", "doomscrolling"),
+            ]
+            for pattern, repl in common_en_replacements:
+                reason_clip = re.sub(pattern, repl, reason_clip, flags=re.IGNORECASE)
+
             raw_desc = suggestion.get("description")
             if not raw_desc:
                 raw_desc = f"{title_clip}\n\n{reason_clip}".strip() if reason_clip else title_clip
+            else:
+                for pattern, repl in common_en_replacements:
+                    raw_desc = re.sub(pattern, repl, raw_desc, flags=re.IGNORECASE)
 
             cta_text = "Gimana menurut kalian? Tulis pendapat kalian di kolom komentar ya! 👇"
 
