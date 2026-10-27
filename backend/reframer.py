@@ -137,7 +137,8 @@ def _detect_faces_all_frames(
 ) -> list[list[dict]]:
   """
   Run MediaPipe face detection on each PIL frame.
-  Applies deduplication tracking rules.
+  Applies strict anatomical & spatial filtering to reject hands, microphones,
+  clothing patterns, and stray false positives.
   """
   import numpy as np # type: ignore
 
@@ -149,24 +150,58 @@ def _detect_faces_all_frames(
     faces = []
     if results.detections:
       for det in results.detections:
+        score = det.categories[0].score if det.categories else 0
         bb = det.bounding_box
-        cx = bb.origin_x + bb.width / 2
-        cy = bb.origin_y + bb.height / 2
+        cx = bb.origin_x + bb.width / 2.0
+        cy = bb.origin_y + bb.height / 2.0
         fw = bb.width
         fh = bb.height
-        size = bb.height / vid_height
+        size = fh / vid_height
         
-        # Deduplication Rule: Remove size < 0.05
-        if size < 0.05:
+        # 1. Size Filter: Ignore tiny noise or background specks
+        if size < 0.05 or fw / vid_width < 0.035:
             continue
             
+        # 2. Aspect Ratio: Human face bounding boxes have ratio 0.50 - 1.40
+        # Hands, arms, or fingers frequently form extreme ratios (<0.45 or >1.50)
+        ar = fw / max(fh, 1.0)
+        if ar < 0.50 or ar > 1.40:
+            continue
+
+        # 3. Hand / Lap Zone Filter: In horizontal video, faces sit in upper/mid area.
+        # Bottom 24% of frame is the desk/lap/keyboard area where gesturing hands rest.
+        if cy > vid_height * 0.76:
+            continue
+
+        # 4. Anatomical Keypoints Check: Validate facial geometry
+        if det.keypoints and len(det.keypoints) >= 4:
+            re = det.keypoints[0]
+            le = det.keypoints[1]
+            mouth = det.keypoints[3]
+            eye_y = (re.y + le.y) / 2.0 * vid_height
+            mouth_y = mouth.y * vid_height
+            eye_dist = math.hypot((re.x - le.x) * vid_width, (re.y - le.y) * vid_height)
+
+            # Eyes must be strictly above mouth in upright footage (rejects knuckles/hands)
+            if eye_y >= mouth_y - (fh * 0.04):
+                continue
+
+            # Eyes must have plausible spacing (preserves profiles, rejects collapsed points)
+            if eye_dist < fw * 0.05 or eye_dist > fw * 0.95:
+                continue
+
+        # 5. Confidence Threshold
+        if score < 0.28:
+            continue
+
         faces.append({
           "cx": cx, "cy": cy,
           "w": fw, "h": fh,
-          "size": size
+          "size": size,
+          "score": score
         })
     
-    # Deduplication Rule: Remove detections within 50px of another
+    # Deduplication Rule: Remove detections within 50px of each other
     valid_faces = []
     for f in faces:
         is_dup = False
@@ -205,6 +240,35 @@ def _ease_in_out(t: float) -> float:
     return 2 * t * t if t < 0.5 else 1 - math.pow(-2 * t + 2, 2) / 2
 
 
+def _is_scene_cut(img1: Image.Image, img2: Image.Image) -> bool:
+    """Detect visual shot cut/scene change using fast luminance difference."""
+    try:
+        arr1 = np.array(img1.convert("L").resize((64, 36)), dtype=np.float32)
+        arr2 = np.array(img2.convert("L").resize((64, 36)), dtype=np.float32)
+        return float(np.mean(np.abs(arr1 - arr2))) > 34.0
+    except Exception:
+        return False
+
+
+def _cluster_speaker_anchors(face_data: list[list[dict]], min_count: int = 2) -> list[float]:
+    """Find persistent horizontal speaker anchor positions across the video."""
+    all_cxs = [f["cx"] for sec in face_data for f in sec if f.get("cx") is not None]
+    if not all_cxs:
+        return []
+    clusters: list[list[float]] = []
+    for cx in sorted(all_cxs):
+        matched = False
+        for c in clusters:
+            if abs(np.mean(c) - cx) < 180:
+                c.append(cx)
+                matched = True
+                break
+        if not matched:
+            clusters.append([cx])
+    anchors = [float(np.mean(c)) for c in clusters if len(c) >= min_count]
+    return sorted(anchors)
+
+
 async def _reframe_dynamic_zoom(
   input_path: str,
   output_path: str,
@@ -216,82 +280,104 @@ async def _reframe_dynamic_zoom(
 ) -> tuple[bool, int]:
     fps = 30
     total_frames = int(duration * fps)
-    
-    # Majority vote for face count
+    total_secs = math.ceil(duration)
+
+    # 1. Majority vote for overall face count
     face_counts = [len(f) for f in face_data]
     overall_face_count = max(set(face_counts), key=face_counts.count) if face_counts else 0
 
-    # 1. Calculate an adaptive, stable base zoom from median face size across the clip.
-    # This prevents the camera from "breathing" (zooming in/out erratically on tiny face fluctuations).
-    all_sizes = [f['size'] for sec in face_data for f in sec if f.get('size')]
+    # 2. Scene cut detection across sampled frames
+    scene_cuts = [False] * total_secs
+    if frames and len(frames) > 1:
+        for s in range(1, min(len(frames), total_secs)):
+            if _is_scene_cut(frames[s - 1], frames[s]):
+                scene_cuts[s] = True
+
+    # 3. Speaker anchors & transient false-positive rejection
+    speaker_anchors = _cluster_speaker_anchors(face_data, min_count=2)
+    cleaned_face_data = []
+    for sec_faces in face_data:
+        if not speaker_anchors or len(sec_faces) <= 1:
+            cleaned_face_data.append(sec_faces)
+        else:
+            # If multiple detections, filter out any stray detection far from all known anchors
+            v_faces = []
+            for f in sec_faces:
+                near_anchor = any(abs(f["cx"] - anchor) < 220 for anchor in speaker_anchors)
+                if near_anchor or f.get("score", 1.0) >= 0.55:
+                    v_faces.append(f)
+            cleaned_face_data.append(v_faces if v_faces else sec_faces)
+
+    # 4. Adaptive Base Zoom
+    all_sizes = [f['size'] for sec in cleaned_face_data for f in sec if f.get('size')]
     if all_sizes:
         all_sizes.sort()
         median_size = all_sizes[len(all_sizes) // 2]
-        # In vertical 9:16, face occupying ~22% of height gives a clean, professional Medium Close-Up.
-        base_zoom = max(1.20, min(0.24 / max(median_size, 0.08), 1.75))
+        base_zoom = max(1.20, min(0.24 / max(median_size, 0.08), 1.70))
     else:
         median_size = 0.25
         base_zoom = 1.35
 
-    logger.info(f"[Reframer] Professional Auto-Reframe: median face size={median_size:.3f}, base_zoom={base_zoom:.2f}")
+    logger.info(f"[Director] Dynamic Decision Engine: base_zoom={base_zoom:.2f}, anchors={speaker_anchors}")
 
-    # 2. Build per-second targets with Dynamic Scene-Aware Active Speaker Tracking
-    # Seamlessly handles: single speaker, dual speaker interviews, scene changes, and momentary face turns.
+    # 5. Build per-second targets with Dynamic Active Speaker Tracking & Pacing
     sec_targets = []
-    total_secs = math.ceil(duration)
     last_known_cx = vid_width / 2.0
     last_known_cy = vid_height / 2.0
-    active_speaker_hold_streak = 0
-    SWITCH_STREAK_REQUIRED = 2
-
+    active_speaker_history = []
     crop_w_nominal = (float(vid_height) / base_zoom) * 9.0 / 16.0
 
-    for s in range(len(face_data)):
-        sec_faces = face_data[s]
+    for s in range(len(cleaned_face_data)):
+        sec_faces = cleaned_face_data[s]
 
         if not sec_faces:
-            # Case 3: Momentary face turn / profile -> HOLD LAST KNOWN SPEAKER!
-            # Never drift into the empty middle space!
+            # Hold last known framing position
             sec_targets.append({
                 "has_face": False,
                 "cx": last_known_cx,
                 "cy": last_known_cy,
-                "zoom": base_zoom
+                "zoom": base_zoom,
+                "is_cut": scene_cuts[s] if s < len(scene_cuts) else False,
+                "mode": "hold"
             })
             continue
 
         if len(sec_faces) == 1:
-            # Case 1: Exactly 1 person on screen (e.g. monologue, host cut) -> Lock on person
             f = sec_faces[0]
             last_known_cx = f['cx']
             last_known_cy = f['cy']
+            active_speaker_history.append("single")
             sec_targets.append({
                 "has_face": True,
                 "cx": f['cx'],
                 "cy": f['cy'],
-                "zoom": base_zoom
+                "zoom": base_zoom,
+                "is_cut": scene_cuts[s] if s < len(scene_cuts) else False,
+                "mode": "single"
             })
         else:
-            # Case 2: Multiple people on screen (e.g. podcast table, interview)
             sorted_faces = sorted(sec_faces, key=lambda x: x['cx'])
             f1, f2 = sorted_faces[0], sorted_faces[-1]
             face_dist = abs(f1['cx'] - f2['cx'])
 
-            # If both people are close enough to fit in a 9:16 vertical frame:
+            # If both fit in standard vertical framing:
             if face_dist < (crop_w_nominal * 0.72):
                 c_x = (f1['cx'] + f2['cx']) / 2.0
                 c_y = (f1['cy'] + f2['cy']) / 2.0
                 last_known_cx = c_x
                 last_known_cy = c_y
+                active_speaker_history.append("two_shot")
                 sec_targets.append({
                     "has_face": True,
                     "cx": c_x,
                     "cy": c_y,
-                    "zoom": max(1.15, min(base_zoom, 1.35))
+                    "zoom": max(1.15, min(base_zoom, 1.30)),
+                    "is_cut": scene_cuts[s] if s < len(scene_cuts) else False,
+                    "mode": "two_shot"
                 })
             else:
-                # Two separated speakers (e.g. Left vs Right):
-                # Measure mouth activity if frames exist
+                # Two separated speakers (e.g. Left vs Right podcast setup)
+                # Compute lip movement
                 m1_diff, m2_diff = 0.0, 0.0
                 if frames and s > 0 and s < len(frames):
                     prev_f = frames[s - 1]
@@ -303,38 +389,66 @@ async def _reframe_dynamic_zoom(
                     m1_diff = _compute_mouth_diff(r1_prev, r1_curr)
                     m2_diff = _compute_mouth_diff(r2_prev, r2_curr)
 
-                # Determine who is actively speaking
-                if m2_diff > m1_diff * 1.35 and m2_diff > 6.0:
+                if m2_diff > m1_diff * 1.30 and m2_diff > 5.5:
+                    speaker = "right"
                     dominant_face = f2
-                elif m1_diff > m2_diff * 1.35 and m1_diff > 6.0:
+                elif m1_diff > m2_diff * 1.30 and m1_diff > 5.5:
+                    speaker = "left"
                     dominant_face = f1
                 else:
-                    # Maintain focus on whichever face is closer to the current camera position
+                    speaker = "hold"
                     dominant_face = min(sorted_faces, key=lambda f: abs(f['cx'] - last_known_cx))
 
-                last_known_cx = dominant_face['cx']
-                last_known_cy = dominant_face['cy']
-                sec_targets.append({
-                    "has_face": True,
-                    "cx": dominant_face['cx'],
-                    "cy": dominant_face['cy'],
-                    "zoom": base_zoom
-                })
+                # Check for rapid conversational ping-pong banter
+                # If speaker changed rapidly in the last 2 seconds, pull back to Two-Shot
+                recent_history = active_speaker_history[-2:] if len(active_speaker_history) >= 2 else []
+                is_rapid_banter = (
+                    len(recent_history) == 2 and 
+                    recent_history[0] != recent_history[1] and 
+                    speaker != "hold" and 
+                    speaker != recent_history[-1]
+                )
+
+                if is_rapid_banter:
+                    # Autonomous Director Decision: Show dynamic Two-Shot during quick back-and-forth banter!
+                    c_x = (f1['cx'] + f2['cx']) / 2.0
+                    c_y = (f1['cy'] + f2['cy']) / 2.0
+                    last_known_cx = c_x
+                    last_known_cy = c_y
+                    active_speaker_history.append("banter_two_shot")
+                    sec_targets.append({
+                        "has_face": True,
+                        "cx": c_x,
+                        "cy": c_y,
+                        "zoom": 1.15,
+                        "is_cut": scene_cuts[s] if s < len(scene_cuts) else False,
+                        "mode": "banter_two_shot"
+                    })
+                else:
+                    last_known_cx = dominant_face['cx']
+                    last_known_cy = dominant_face['cy']
+                    active_speaker_history.append(speaker)
+                    sec_targets.append({
+                        "has_face": True,
+                        "cx": dominant_face['cx'],
+                        "cy": dominant_face['cy'],
+                        "zoom": base_zoom,
+                        "is_cut": scene_cuts[s] if s < len(scene_cuts) else False,
+                        "mode": "speaker"
+                    })
 
     while len(sec_targets) < total_secs:
         sec_targets.append(sec_targets[-1] if sec_targets else {
-            "has_face": False, "cx": last_known_cx, "cy": last_known_cy, "zoom": base_zoom
+            "has_face": False, "cx": last_known_cx, "cy": last_known_cy, "zoom": base_zoom, "is_cut": False, "mode": "hold"
         })
 
-    # 3. Continuous frame-by-frame smoothing with Smart Deadband.
-    # A seated speaker talking/nodding shifts by 20-40px. A professional camera operator
-    # locks the camera unless the speaker actually moves outside the tolerance zone.
-    DEADBAND_X = 65.0      # Tolerance zone (px) - no camera wobble on natural head gestures
-    DEADBAND_Y = 45.0
-    ALPHA_POS = 0.045      # Cinematic gimbal glide (~0.8s smooth settling)
-    ALPHA_ZOOM = 0.020     # Ultra-gentle zoom transition (~1.5s settling)
-    MAX_PAN_SPEED = 4.5    # Max 4.5 px/frame (135 px/sec) to prevent dizzying whip-pans
-    HOLD_NO_FACE = int(3.5 * fps)  # Hold framing 3.5s on B-roll/slides before gentle wide center
+    # 6. Autonomous Dynamic Framing Engine (Instant Cut vs Responsive Follow)
+    DEADBAND_X = 40.0       # Stable tolerance zone (px) - locks on natural gestures
+    DEADBAND_Y = 30.0
+    ALPHA_POS = 0.12        # Snappy responsive follow for same speaker
+    ALPHA_ZOOM = 0.04       # Smooth zoom transition
+    MAX_PAN_SPEED = 22.0    # Responsive pan speed limit (px/frame)
+    SNAP_CUT_DIST = 210.0   # Distance threshold (px) to trigger an instant multicam cut instead of slow pan
 
     curr_cx = sec_targets[0]["cx"] if sec_targets[0]["has_face"] else vid_width / 2.0
     curr_cy = sec_targets[0]["cy"] if sec_targets[0]["has_face"] else vid_height / 2.0
@@ -344,43 +458,70 @@ async def _reframe_dynamic_zoom(
     target_cy = curr_cy
     target_zoom = curr_zoom
 
-    frames_since_face = 0
     frame_crops = []
 
     for f_idx in range(total_frames):
         sec = min(int(f_idx / fps), total_secs - 1)
         st = sec_targets[sec]
+        frame_in_sec = f_idx % fps
+
+        is_new_sec = (frame_in_sec == 0)
+        is_scene_cut = st.get("is_cut", False)
 
         if st["has_face"]:
-            frames_since_face = 0
-            # Apply Deadband: Only re-anchor target if movement exceeds tolerance zone
-            dx = abs(st["cx"] - target_cx)
-            dy = abs(st["cy"] - target_cy)
-            if dx > DEADBAND_X:
-                target_cx = st["cx"]
-            if dy > DEADBAND_Y:
-                target_cy = st["cy"]
-            target_zoom = base_zoom
+            raw_target_x = st["cx"]
+            raw_target_y = st["cy"]
+            raw_target_zoom = st["zoom"]
         else:
-            frames_since_face += 1
-            # Hold the last speaker position - never steer away to empty center
-            target_cx = last_known_cx
-            target_cy = last_known_cy
-            target_zoom = base_zoom
+            raw_target_x = last_known_cx
+            raw_target_y = last_known_cy
+            raw_target_zoom = base_zoom
 
-        # Exponential moving average with velocity limiting
-        step_x = (target_cx - curr_cx) * ALPHA_POS
-        step_x = max(-MAX_PAN_SPEED, min(step_x, MAX_PAN_SPEED))
-        curr_cx += step_x
+        # Autonomous Decision: Instant Multicam Cut vs Smooth Organic Follow
+        # On a scene change OR a speaker switch across the room (> 210px):
+        # CUT INSTANTLY! Eliminates the sluggish 8-second panning across empty walls/tables!
+        dist_to_target = abs(raw_target_x - curr_cx)
+        is_speaker_switch = (dist_to_target > SNAP_CUT_DIST)
 
-        step_y = (target_cy - curr_cy) * ALPHA_POS
-        step_y = max(-MAX_PAN_SPEED, min(step_y, MAX_PAN_SPEED))
-        curr_cy += step_y
+        if is_new_sec and (is_scene_cut or is_speaker_switch):
+            # Direct Multicam Cut / Instant Snap
+            curr_cx = raw_target_x
+            curr_cy = raw_target_y
+            target_cx = raw_target_x
+            target_cy = raw_target_y
+            target_zoom = raw_target_zoom
+        else:
+            # Same speaker or subtle adjustment: Apply Deadband & Responsive Follow
+            dx = abs(raw_target_x - target_cx)
+            dy = abs(raw_target_y - target_cy)
+            if dx > DEADBAND_X:
+                target_cx = raw_target_x
+            if dy > DEADBAND_Y:
+                target_cy = raw_target_y
+            target_zoom = raw_target_zoom
+
+            step_x = (target_cx - curr_cx) * ALPHA_POS
+            step_x = max(-MAX_PAN_SPEED, min(step_x, MAX_PAN_SPEED))
+            curr_cx += step_x
+
+            step_y = (target_cy - curr_cy) * ALPHA_POS
+            step_y = max(-MAX_PAN_SPEED, min(step_y, MAX_PAN_SPEED))
+            curr_cy += step_y
 
         curr_zoom += (target_zoom - curr_zoom) * ALPHA_ZOOM
 
+        # Dynamic Hook Punch (First 2.5s)
+        # Adds an energetic +10% punch-in that smoothly settles, boosting social retention!
+        hook_frames = int(2.5 * fps)
+        if f_idx < hook_frames:
+            hook_progress = float(f_idx) / float(hook_frames)
+            hook_boost = 0.10 * (1.0 - _ease_in_out(hook_progress))
+            effective_zoom = curr_zoom * (1.0 + hook_boost)
+        else:
+            effective_zoom = curr_zoom
+
         # Calculate 9:16 vertical crop
-        crop_h = float(vid_height) / curr_zoom
+        crop_h = float(vid_height) / effective_zoom
         crop_w = crop_h * 9.0 / 16.0
 
         if crop_w > vid_width:
@@ -390,12 +531,10 @@ async def _reframe_dynamic_zoom(
                 crop_h = float(vid_height)
                 crop_w = crop_h * 9.0 / 16.0
 
-        # Horizontal: Centered on smoothed speaker position
         crop_x = curr_cx - crop_w / 2.0
         crop_x = max(0.0, min(crop_x, float(vid_width) - crop_w))
 
-        # Vertical: Cinematic Eye-Level Rule (38% from top)
-        # Places face at golden upper-third, leaving headroom & clear lower chest for subtitles
+        # Golden Ratio Eye-Level composition (38% from top)
         crop_y = curr_cy - crop_h * 0.38
         crop_y = max(0.0, min(crop_y, float(vid_height) - crop_h))
 
@@ -405,7 +544,7 @@ async def _reframe_dynamic_zoom(
             "x": int(crop_x), "y": int(crop_y)
         })
 
-    # Step 6: Write sendcmd commands
+    # 7. Write sendcmd commands
     cmd_file = input_path + ".sendcmd"
     lines = []
     for c in frame_crops:
@@ -417,7 +556,7 @@ async def _reframe_dynamic_zoom(
 
     filter_cmd_file = cmd_file.replace('\\', '/').replace(':', '\\:')
 
-    # Step 7: Apply sendcmd with FFmpeg scaling to 1080x1920
+    # 8. Apply sendcmd with FFmpeg scaling to 1080x1920
     filter_cx = (
       f"sendcmd=f='{filter_cmd_file}',"
       f"crop={int(vid_height*9/16)}:{vid_height}:0:0,"
