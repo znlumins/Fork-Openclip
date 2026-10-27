@@ -330,7 +330,8 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
                              f"Processing clip {i+1} of {len(suggestions)}...")
             
             clip = await reframer.process_clip(
-                file_path, suggestion, clips_dir, project_id
+                file_path, suggestion, clips_dir, project_id,
+                transcript_segments=transcript_segments
             )
             
             # STEP 5 — BURN CAPTIONS
