@@ -134,7 +134,7 @@ export default function ProjectPage() {
                 <div id="video-preview-card" className="glass-card rounded-3xl p-6 border border-white/10 shadow-2xl bg-slate-900/60 flex flex-col items-center">
                     <div className="w-full flex items-center justify-between pb-4 border-b border-white/10 mb-5">
                         <div className="flex items-center gap-3">
-                            <span className="p-2.5 rounded-xl bg-primary/20 text-primary">
+                            <span className="p-2.5 rounded-xl bg-primary/30 text-white">
                                 <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             </span>
                             <div>
@@ -148,7 +148,7 @@ export default function ProjectPage() {
                         </div>
                         {selectedClip && (
                             <div className="flex items-center gap-2">
-                                <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-primary/20 text-primary border border-primary/30">
+                                <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-primary text-white border border-primary/40 shadow-sm">
                                     9:16 Shorts
                                 </span>
                                 <a
@@ -239,7 +239,7 @@ export default function ProjectPage() {
                     <div className="glass-card rounded-2xl p-6 space-y-4 border border-white/10 shadow-xl bg-slate-900/40">
                         <div className="flex items-center justify-between border-b border-white/5 pb-3">
                             <div className="flex items-center gap-2.5">
-                                <span className="p-2 rounded-xl bg-primary/20 text-primary">
+                                <span className="p-2 rounded-xl bg-primary/30 text-white">
                                     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>
                                 </span>
                                 <div>
@@ -258,7 +258,7 @@ export default function ProjectPage() {
                                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Judul / Hook Video (Bahasa Indonesia)</label>
                                 <button
                                     onClick={() => handleCopy(currentTitle, "title")}
-                                    className="text-xs font-bold text-primary hover:text-white flex items-center gap-1 transition-colors"
+                                    className="text-xs font-bold text-white hover:text-slate-300 flex items-center gap-1 transition-colors"
                                 >
                                     {copiedField === "title" ? "✓ Tersalin!" : "📋 Salin Judul"}
                                 </button>
@@ -302,14 +302,14 @@ export default function ProjectPage() {
                                     <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Hashtags</label>
                                     <button
                                         onClick={() => handleCopy(selectedClip.hashtags?.map(h => h.startsWith("#") ? h : `#${h}`).join(" ") || "", "tags")}
-                                        className="text-xs text-primary hover:text-white transition-colors font-semibold"
+                                        className="text-xs text-white hover:text-slate-300 transition-colors font-semibold"
                                     >
                                         {copiedField === "tags" ? "✓ Tersalin!" : "Salin Semua Tag"}
                                     </button>
                                 </div>
                                 <div className="flex flex-wrap gap-2">
                                     {selectedClip.hashtags.map((h, idx) => (
-                                        <span key={idx} className="text-xs px-2.5 py-1 rounded-lg bg-white/5 border border-white/10 text-primary font-medium">
+                                        <span key={idx} className="text-xs px-2.5 py-1 rounded-lg bg-white/10 border border-white/20 text-white font-medium">
                                             {h.startsWith("#") ? h : `#${h}`}
                                         </span>
                                     ))}
@@ -334,7 +334,7 @@ export default function ProjectPage() {
                     ))}
                 </div>
 
-                <a href={project.youtube_url} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-primary hover:underline">
+                <a href={project.youtube_url} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-slate-300 hover:text-white hover:underline">
                     <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24"><path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
                     View original YouTube video
                 </a>
@@ -344,11 +344,11 @@ export default function ProjectPage() {
             <aside className="w-80 flex-shrink-0 border-l border-white/5 flex flex-col">
                 <div className="p-5 border-b border-white/5 glass-dark flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <svg className="h-5 w-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3l14 9-14 9V3z"/></svg>
+                        <svg className="h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3l14 9-14 9V3z"/></svg>
                         <h3 className="font-bold text-white">Generated Clips</h3>
                     </div>
                     {project.clips?.length > 0 && (
-                        <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-primary/20 text-primary border border-primary/30">
+                        <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-primary text-white border border-primary/40 shadow-sm">
                             {project.clips.length} TOTAL
                         </span>
                     )}

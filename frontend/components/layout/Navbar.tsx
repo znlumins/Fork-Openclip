@@ -36,10 +36,8 @@ export function Navbar() {
         <header className="sticky top-0 z-50 w-full bg-slate-950 border-b border-white/10 shadow-lg shadow-black/40 px-6 lg:px-20 py-4">
             <div className="mx-auto flex max-w-7xl items-center justify-between">
                 <div className="flex items-center gap-10">
-                    <Link href="/" className="flex items-center gap-3">
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl overflow-hidden flex-shrink-0">
-                            <img src="/logo.png" alt="OpenClip logo" className="h-full w-full object-contain" />
-                        </div>
+                    <Link href="/" className="flex items-center gap-3 group">
+                        <img src="/logo.png" alt="OpenClip logo" className="h-9 w-9 object-contain flex-shrink-0 select-none group-hover:scale-105 transition-transform" />
                         <span className="text-xl font-bold tracking-tight text-white">OpenClip</span>
                     </Link>
                 </div>
