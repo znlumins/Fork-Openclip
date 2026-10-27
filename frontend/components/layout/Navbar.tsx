@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState, Suspense } from "react";
 
 function SearchInput() {
@@ -32,8 +32,6 @@ function SearchInput() {
 }
 
 export function Navbar() {
-    const pathname = usePathname();
-
     return (
         <header className="sticky top-0 z-50 w-full glass-dark px-6 lg:px-20 py-4">
             <div className="mx-auto flex max-w-7xl items-center justify-between">
@@ -44,11 +42,6 @@ export function Navbar() {
                         </div>
                         <span className="text-xl font-bold tracking-tight text-white">OpenClip</span>
                     </Link>
-                    <nav className="hidden md:flex items-center gap-6">
-                        <Link href="/" className={`text-sm font-medium transition-colors ${pathname === "/" ? "text-white" : "text-slate-400 hover:text-white"}`}>
-                            Projects
-                        </Link>
-                    </nav>
                 </div>
 
                 <div className="flex flex-1 items-center justify-end gap-3">
