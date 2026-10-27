@@ -39,9 +39,9 @@ export default function CreateProjectPage() {
     useEffect(() => {
         getSettings()
             .then(s => {
-                setHasApiKey(s.has_api_key);
-                setProvider(s.llm_provider);
-                setModel(s.llm_model);
+                setHasApiKey(Boolean(s.has_api_key));
+                if (s.llm_provider) setProvider(s.llm_provider);
+                if (s.llm_model) setModel(s.llm_model);
             })
             .catch(console.error);
     }, []);
@@ -56,7 +56,8 @@ export default function CreateProjectPage() {
                 .then(data => { setGeneratedClips(data.clips || []); setIsProcessing(false); })
                 .catch(() => { setApiError("Failed to load clips."); setIsProcessing(false); });
         } else if (stage === "error") {
-            setIsProcessing(false);
+            const timer = setTimeout(() => setIsProcessing(false), 0);
+            return () => clearTimeout(timer);
         }
     }, [stage, projectId]);
 
@@ -166,7 +167,7 @@ export default function CreateProjectPage() {
                         <div>
                             <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Model</label>
                             <input
-                                value={model}
+                                value={model ?? ""}
                                 onChange={e => setModel(e.target.value)}
                                 className="w-full rounded-xl bg-slate-900/50 border border-slate-800 px-3 py-2.5 text-sm text-slate-100 focus:border-primary focus:outline-none transition-all"
                                 placeholder="gpt-4o"

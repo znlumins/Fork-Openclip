@@ -458,9 +458,8 @@ async def _call_anthropic(prompt: str, api_key: str, model: str) -> str:
 
 
 async def _call_gemini(prompt: str, api_key: str, model: str) -> str:
-    # Use the user's specified model, or fall back to gemini-2.0-flash
-    model = model or "gemini-2.0-flash"
-    logger.info(f"Calling Gemini with model: {model}")
+    target_model = model or "gemini-3.5-flash-lite"
+    logger.info(f"Calling Gemini with model: {target_model}")
 
     def _do_call() -> str:
         try:
@@ -478,6 +477,8 @@ async def _call_gemini(prompt: str, api_key: str, model: str) -> str:
         if not effective_api_key:
             raise RuntimeError("Gemini API key missing. Set it in Settings or GEMINI_API_KEY env var.")
 
+        req_model = target_model
+
         # Create client with explicit timeout via http_options
         client = genai.Client(
             api_key=effective_api_key,
@@ -491,10 +492,10 @@ async def _call_gemini(prompt: str, api_key: str, model: str) -> str:
         )
 
         try:
-            logger.info(f"Sending prompt to Gemini ({len(prompt)} chars)...")
+            logger.info(f"Sending prompt to Gemini ({len(prompt)} chars, model={req_model})...")
             # Use non-streaming for simpler, more reliable responses
             response = client.models.generate_content(
-                model=model,
+                model=req_model,
                 contents=prompt,
                 config=generate_content_config,
             )
@@ -503,12 +504,25 @@ async def _call_gemini(prompt: str, api_key: str, model: str) -> str:
             return result
         except Exception as e:
             error_str = str(e).lower()
-            logger.error(f"Gemini API error: {e}")
-            # Handle Gemini rate limit errors
-            if "429" in error_str or "resource_exhausted" in error_str or "quota" in error_str:
-                logger.warning(f"Gemini rate limit detected: {e}")
+            logger.error(f"Gemini API error with {req_model}: {e}")
+            fallback_models = [m for m in ["gemini-3.5-flash-lite", "gemini-3-flash-preview", "gemini-3.5-flash"] if m != req_model]
+            if any(k in error_str for k in ["503", "404", "unavailable", "429", "resource_exhausted", "quota"]):
+                for alt_model in fallback_models:
+                    logger.info(f"Retrying with fallback model: {alt_model}...")
+                    try:
+                        response = client.models.generate_content(
+                            model=alt_model,
+                            contents=prompt,
+                            config=generate_content_config,
+                        )
+                        result = response.text or "[]"
+                        logger.info(f"Gemini fallback ({alt_model}) response received ({len(result)} chars)")
+                        return result
+                    except Exception as e2:
+                        logger.error(f"Fallback {alt_model} failed: {e2}")
+            if "429" in error_str or "resource_exhausted" in error_str or "quota" in error_str or "503" in error_str:
+                logger.warning(f"Gemini rate limit or temporary error: {e}")
                 raise RuntimeError(f"Rate limit: {e}")
-            # Handle timeout errors
             if "timeout" in error_str or "deadline" in error_str:
                 logger.warning(f"Gemini timeout detected: {e}")
                 raise RuntimeError(f"Timeout: {e}")

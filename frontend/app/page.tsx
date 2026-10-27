@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { getProjects, deleteProject, createProject, getApiBaseUrl } from "@/lib/api";
+import { getProjects, deleteProject, createProject } from "@/lib/api";
 import { Project } from "@/lib/types";
 
 function getYouTubeThumbnail(url: string): string | null {
@@ -44,7 +44,7 @@ function StatusBadge({ status }: { status: Project["status"] }) {
     );
 }
 
-export default function Dashboard() {
+function DashboardContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const searchQuery = searchParams.get("q") || "";
@@ -295,5 +295,17 @@ export default function Dashboard() {
             )}
 
         </div>
+    );
+}
+
+export default function Dashboard() {
+    return (
+        <Suspense fallback={
+            <div className="flex h-screen items-center justify-center">
+                <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+            </div>
+        }>
+            <DashboardContent />
+        </Suspense>
     );
 }

@@ -1,10 +1,12 @@
 import subprocess
 import json
 import os
+import ffmpeg_utils
 import math
 import sys
 import types
 from PIL import Image # type: ignore
+import numpy as np # type: ignore
 
 # mediapipe internally imports cv2 only for its drawing utilities (drawing_styles.py ->
 # drawing_utils.py). Our code never calls any drawing functions. We pre-stub cv2 in
@@ -32,7 +34,7 @@ def _ensure_model_exists():
 
 _ensure_model_exists()
 base_options = python.BaseOptions(model_asset_path=model_path)
-options = vision.FaceDetectorOptions(base_options=base_options)
+options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.18)
 face_detector = vision.FaceDetector.create_from_options(options)
 
 async def process_clip(
@@ -71,7 +73,7 @@ async def process_clip(
     f"clip_{project_id}_{suggestion['start']}.mp4"
   )
 
-  success, face_count = await _reframe_dynamic_zoom(raw_clip, output_clip, width, height, face_data, duration)
+  success, face_count = await _reframe_dynamic_zoom(raw_clip, output_clip, width, height, face_data, duration, frames=frames)
   if not success:
     await _reframe_static_fallback(raw_clip, output_clip, width, height, face_data)
 
@@ -98,9 +100,7 @@ def _extract_sample_frames(video_path: str) -> list[Image.Image]:
   Extract 1 frame per second as raw bytes using FFmpeg.
   No temp files — pipe directly to memory.
   """
-  ffmpeg_path = os.path.expandvars(
-      r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe"
-  )
+  ffmpeg_path = ffmpeg_utils.get_ffmpeg_exe()
   result = subprocess.run([
     ffmpeg_path, "-i", video_path,
     "-vf", "fps=1",
@@ -181,6 +181,26 @@ def _detect_faces_all_frames(
   return all_faces
 
 
+
+def _extract_mouth_roi(frame: Image.Image, face: dict) -> Optional[np.ndarray]:
+    """Extract and normalize mouth region of interest for speech motion detection."""
+    cx, cy = face['cx'], face['cy']
+    fw, fh = face['w'], face['h']
+    x1 = int(max(0, cx - fw * 0.28))
+    x2 = int(min(frame.width, cx + fw * 0.28))
+    y1 = int(max(0, cy + fh * 0.12))
+    y2 = int(min(frame.height, cy + fh * 0.44))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = frame.crop((x1, y1, x2, y2)).convert('L').resize((32, 32))
+    return np.array(crop, dtype=np.float32)
+
+def _compute_mouth_diff(roi1: Optional[np.ndarray], roi2: Optional[np.ndarray]) -> float:
+    """Compute frame-to-frame mouth movement difference."""
+    if roi1 is None or roi2 is None:
+        return 0.0
+    return float(np.mean(np.abs(roi1 - roi2)))
+
 def _ease_in_out(t: float) -> float:
     return 2 * t * t if t < 0.5 else 1 - math.pow(-2 * t + 2, 2) / 2
 
@@ -191,7 +211,8 @@ async def _reframe_dynamic_zoom(
   vid_width: int,
   vid_height: int,
   face_data: list[list[dict]],
-  duration: float
+  duration: float,
+  frames: Optional[list[Image.Image]] = None
 ) -> tuple[bool, int]:
     fps = 30
     total_frames = int(duration * fps)
@@ -200,137 +221,182 @@ async def _reframe_dynamic_zoom(
     face_counts = [len(f) for f in face_data]
     overall_face_count = max(set(face_counts), key=face_counts.count) if face_counts else 0
 
-    # Step 3: Build per-second keyframes list
+    # 1. Calculate an adaptive, stable base zoom from median face size across the clip.
+    # This prevents the camera from "breathing" (zooming in/out erratically on tiny face fluctuations).
+    all_sizes = [f['size'] for sec in face_data for f in sec if f.get('size')]
+    if all_sizes:
+        all_sizes.sort()
+        median_size = all_sizes[len(all_sizes) // 2]
+        # In vertical 9:16, face occupying ~22% of height gives a clean, professional Medium Close-Up.
+        base_zoom = max(1.20, min(0.24 / max(median_size, 0.08), 1.75))
+    else:
+        median_size = 0.25
+        base_zoom = 1.35
+
+    logger.info(f"[Reframer] Professional Auto-Reframe: median face size={median_size:.3f}, base_zoom={base_zoom:.2f}")
+
+    # 2. Build per-second targets with Dynamic Scene-Aware Active Speaker Tracking
+    # Seamlessly handles: single speaker, dual speaker interviews, scene changes, and momentary face turns.
     sec_targets = []
     total_secs = math.ceil(duration)
-    for sec_data in face_data:
-        if sec_data:
-            # Pick the largest face to track
-            face = max(sec_data, key=lambda f: f['size'])
-            size = face['size']
-            if size < 0.10: zoom_target = 2.8
-            elif size < 0.20: zoom_target = 2.2
-            elif size < 0.35: zoom_target = 1.7
-            else: zoom_target = 1.3
-            sec_targets.append({
-                "has_face": True, 
-                "zoom": zoom_target,
-                "cx": face['cx'],
-                "cy": face['cy']
-            })
-        else:
+    last_known_cx = vid_width / 2.0
+    last_known_cy = vid_height / 2.0
+    active_speaker_hold_streak = 0
+    SWITCH_STREAK_REQUIRED = 2
+
+    crop_w_nominal = (float(vid_height) / base_zoom) * 9.0 / 16.0
+
+    for s in range(len(face_data)):
+        sec_faces = face_data[s]
+
+        if not sec_faces:
+            # Case 3: Momentary face turn / profile -> HOLD LAST KNOWN SPEAKER!
+            # Never drift into the empty middle space!
             sec_targets.append({
                 "has_face": False,
-                "zoom": 1.0,
-                "cx": vid_width / 2.0,
-                "cy": vid_height / 2.0
+                "cx": last_known_cx,
+                "cy": last_known_cy,
+                "zoom": base_zoom
             })
-    
-    # Pad sec_targets to fill entire duration if frames were missed
+            continue
+
+        if len(sec_faces) == 1:
+            # Case 1: Exactly 1 person on screen (e.g. monologue, host cut) -> Lock on person
+            f = sec_faces[0]
+            last_known_cx = f['cx']
+            last_known_cy = f['cy']
+            sec_targets.append({
+                "has_face": True,
+                "cx": f['cx'],
+                "cy": f['cy'],
+                "zoom": base_zoom
+            })
+        else:
+            # Case 2: Multiple people on screen (e.g. podcast table, interview)
+            sorted_faces = sorted(sec_faces, key=lambda x: x['cx'])
+            f1, f2 = sorted_faces[0], sorted_faces[-1]
+            face_dist = abs(f1['cx'] - f2['cx'])
+
+            # If both people are close enough to fit in a 9:16 vertical frame:
+            if face_dist < (crop_w_nominal * 0.72):
+                c_x = (f1['cx'] + f2['cx']) / 2.0
+                c_y = (f1['cy'] + f2['cy']) / 2.0
+                last_known_cx = c_x
+                last_known_cy = c_y
+                sec_targets.append({
+                    "has_face": True,
+                    "cx": c_x,
+                    "cy": c_y,
+                    "zoom": max(1.15, min(base_zoom, 1.35))
+                })
+            else:
+                # Two separated speakers (e.g. Left vs Right):
+                # Measure mouth activity if frames exist
+                m1_diff, m2_diff = 0.0, 0.0
+                if frames and s > 0 and s < len(frames):
+                    prev_f = frames[s - 1]
+                    curr_f = frames[s]
+                    r1_prev = _extract_mouth_roi(prev_f, f1)
+                    r1_curr = _extract_mouth_roi(curr_f, f1)
+                    r2_prev = _extract_mouth_roi(prev_f, f2)
+                    r2_curr = _extract_mouth_roi(curr_f, f2)
+                    m1_diff = _compute_mouth_diff(r1_prev, r1_curr)
+                    m2_diff = _compute_mouth_diff(r2_prev, r2_curr)
+
+                # Determine who is actively speaking
+                if m2_diff > m1_diff * 1.35 and m2_diff > 6.0:
+                    dominant_face = f2
+                elif m1_diff > m2_diff * 1.35 and m1_diff > 6.0:
+                    dominant_face = f1
+                else:
+                    # Maintain focus on whichever face is closer to the current camera position
+                    dominant_face = min(sorted_faces, key=lambda f: abs(f['cx'] - last_known_cx))
+
+                last_known_cx = dominant_face['cx']
+                last_known_cy = dominant_face['cy']
+                sec_targets.append({
+                    "has_face": True,
+                    "cx": dominant_face['cx'],
+                    "cy": dominant_face['cy'],
+                    "zoom": base_zoom
+                })
+
     while len(sec_targets) < total_secs:
-        sec_targets.append(sec_targets[-1] if sec_targets else {"has_face": False, "zoom": 1.0, "cx": vid_width / 2.0, "cy": vid_height / 2.0})
+        sec_targets.append(sec_targets[-1] if sec_targets else {
+            "has_face": False, "cx": last_known_cx, "cy": last_known_cy, "zoom": base_zoom
+        })
 
+    # 3. Continuous frame-by-frame smoothing with Smart Deadband.
+    # A seated speaker talking/nodding shifts by 20-40px. A professional camera operator
+    # locks the camera unless the speaker actually moves outside the tolerance zone.
+    DEADBAND_X = 65.0      # Tolerance zone (px) - no camera wobble on natural head gestures
+    DEADBAND_Y = 45.0
+    ALPHA_POS = 0.045      # Cinematic gimbal glide (~0.8s smooth settling)
+    ALPHA_ZOOM = 0.020     # Ultra-gentle zoom transition (~1.5s settling)
+    MAX_PAN_SPEED = 4.5    # Max 4.5 px/frame (135 px/sec) to prevent dizzying whip-pans
+    HOLD_NO_FACE = int(3.5 * fps)  # Hold framing 3.5s on B-roll/slides before gentle wide center
+
+    curr_cx = sec_targets[0]["cx"] if sec_targets[0]["has_face"] else vid_width / 2.0
+    curr_cy = sec_targets[0]["cy"] if sec_targets[0]["has_face"] else vid_height / 2.0
+    curr_zoom = base_zoom if sec_targets[0]["has_face"] else 1.0
+
+    target_cx = curr_cx
+    target_cy = curr_cy
+    target_zoom = curr_zoom
+
+    frames_since_face = 0
     frame_crops = []
-    last_face_zoom = 1.0
-    last_face_cx = vid_width / 2.0
-    last_face_cy = vid_height / 2.0
-    
-    frames_since_face_lost = 0
-    ZOOM_OUT_HOLD = int(2 * fps)  # wait 2s after face loss before zoom-out starts
-    ZOOM_OUT_DUR = int(1 * fps)   # complete zoom-out transition in ~1s
-    NO_FACE_ZOOM_RETAIN = 0.75    # keep 75% of last face zoom (relative to 1.0)
-    REACQUIRE_DUR = int(0.7 * fps)  # smooth zoom/pan back to face in ~0.7s
 
-    # Track rendered state so reacquire can ease from current framing.
-    rendered_zoom = 1.0
-    rendered_cx = vid_width / 2.0
-    rendered_cy = vid_height / 2.0
-    prev_has_face = False
-
-    reacquire_frames = REACQUIRE_DUR
-    reacquire_start_zoom = rendered_zoom
-    reacquire_start_cx = rendered_cx
-    reacquire_start_cy = rendered_cy
-    reacquire_end_zoom = rendered_zoom
-    reacquire_end_cx = rendered_cx
-    reacquire_end_cy = rendered_cy
-
-    # Step 4 & 5: Interpolate keyframes and convert to crop parameters
     for f_idx in range(total_frames):
         sec = min(int(f_idx / fps), total_secs - 1)
-        target = sec_targets[sec]
+        st = sec_targets[sec]
 
-        current_zoom = 1.0
-        current_cx = vid_width / 2.0
-        current_cy = vid_height / 2.0
-
-        if target["has_face"]:
-            frames_since_face_lost = 0
-            face_zoom = target["zoom"]
-            face_cx = target["cx"]
-            face_cy = target["cy"]
-
-            # Start a smooth transition when a face is re-detected.
-            if not prev_has_face:
-                reacquire_frames = 0
-                reacquire_start_zoom = rendered_zoom
-                reacquire_start_cx = rendered_cx
-                reacquire_start_cy = rendered_cy
-                reacquire_end_zoom = face_zoom
-                reacquire_end_cx = face_cx
-                reacquire_end_cy = face_cy
-
-            if reacquire_frames < REACQUIRE_DUR:
-                t = min(1.0, (reacquire_frames + 1) / float(REACQUIRE_DUR))
-                eased = _ease_in_out(t)
-                current_zoom = reacquire_start_zoom + (reacquire_end_zoom - reacquire_start_zoom) * eased
-                current_cx = reacquire_start_cx + (reacquire_end_cx - reacquire_start_cx) * eased
-                current_cy = reacquire_start_cy + (reacquire_end_cy - reacquire_start_cy) * eased
-                reacquire_frames += 1
-            else:
-                current_zoom = face_zoom
-                current_cx = face_cx
-                current_cy = face_cy
-
-            last_face_zoom = face_zoom
-            last_face_cx = face_cx
-            last_face_cy = face_cy
+        if st["has_face"]:
+            frames_since_face = 0
+            # Apply Deadband: Only re-anchor target if movement exceeds tolerance zone
+            dx = abs(st["cx"] - target_cx)
+            dy = abs(st["cy"] - target_cy)
+            if dx > DEADBAND_X:
+                target_cx = st["cx"]
+            if dy > DEADBAND_Y:
+                target_cy = st["cy"]
+            target_zoom = base_zoom
         else:
-            frames_since_face_lost += 1
-            reacquire_frames = REACQUIRE_DUR
-            if frames_since_face_lost > ZOOM_OUT_HOLD:
-                progress = min(1.0, (frames_since_face_lost - ZOOM_OUT_HOLD) / float(ZOOM_OUT_DUR))
-                eased = _ease_in_out(progress)
-                target_zoom = 1.0 + (last_face_zoom - 1.0) * NO_FACE_ZOOM_RETAIN
-                current_zoom = last_face_zoom + (target_zoom - last_face_zoom) * eased
-                current_cx = last_face_cx + (vid_width / 2.0 - last_face_cx) * eased
-                current_cy = last_face_cy + (vid_height / 2.0 - last_face_cy) * eased
-            else:
-                # Hold before zooming out
-                current_zoom = last_face_zoom
-                current_cx = last_face_cx
-                current_cy = last_face_cy
+            frames_since_face += 1
+            # Hold the last speaker position - never steer away to empty center
+            target_cx = last_known_cx
+            target_cy = last_known_cy
+            target_zoom = base_zoom
 
-        prev_has_face = target["has_face"]
-        rendered_zoom = current_zoom
-        rendered_cx = current_cx
-        rendered_cy = current_cy
+        # Exponential moving average with velocity limiting
+        step_x = (target_cx - curr_cx) * ALPHA_POS
+        step_x = max(-MAX_PAN_SPEED, min(step_x, MAX_PAN_SPEED))
+        curr_cx += step_x
 
-        crop_h = float(vid_height) / current_zoom
+        step_y = (target_cy - curr_cy) * ALPHA_POS
+        step_y = max(-MAX_PAN_SPEED, min(step_y, MAX_PAN_SPEED))
+        curr_cy += step_y
+
+        curr_zoom += (target_zoom - curr_zoom) * ALPHA_ZOOM
+
+        # Calculate 9:16 vertical crop
+        crop_h = float(vid_height) / curr_zoom
         crop_w = crop_h * 9.0 / 16.0
-        
-        # Ensure we don't request a width larger than the original video horizontally
+
         if crop_w > vid_width:
-            crop_w = vid_width
+            crop_w = float(vid_width)
             crop_h = crop_w * 16.0 / 9.0
             if crop_h > vid_height:
-                crop_h = vid_height
-            crop_w = crop_h * 9.0 / 16.0
+                crop_h = float(vid_height)
+                crop_w = crop_h * 9.0 / 16.0
 
-        crop_x = current_cx - crop_w / 2.0
-        crop_y = current_cy - crop_h / 2.0
-        
+        # Horizontal: Centered on smoothed speaker position
+        crop_x = curr_cx - crop_w / 2.0
         crop_x = max(0.0, min(crop_x, float(vid_width) - crop_w))
+
+        # Vertical: Cinematic Eye-Level Rule (38% from top)
+        # Places face at golden upper-third, leaving headroom & clear lower chest for subtitles
+        crop_y = curr_cy - crop_h * 0.38
         crop_y = max(0.0, min(crop_y, float(vid_height) - crop_h))
 
         frame_crops.append({
@@ -339,19 +405,19 @@ async def _reframe_dynamic_zoom(
             "x": int(crop_x), "y": int(crop_y)
         })
 
-    # Step 6: Write sendcmd file
+    # Step 6: Write sendcmd commands
     cmd_file = input_path + ".sendcmd"
     lines = []
     for c in frame_crops:
         ts_str = f"{c['ts']:.3f}"
         lines.append(f"{ts_str} crop w {c['w']}, crop h {c['h']}, crop x {c['x']}, crop y {c['y']};")
 
-    with open(cmd_file, 'w') as f:
+    with open(cmd_file, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
-        
-    filter_cmd_file = cmd_file.replace('\\', '/')
 
-    # Step 7: Apply sendcmd with FFmpeg padding output logic to 1080x1920
+    filter_cmd_file = cmd_file.replace('\\', '/').replace(':', '\\:')
+
+    # Step 7: Apply sendcmd with FFmpeg scaling to 1080x1920
     filter_cx = (
       f"sendcmd=f='{filter_cmd_file}',"
       f"crop={int(vid_height*9/16)}:{vid_height}:0:0,"
@@ -359,26 +425,28 @@ async def _reframe_dynamic_zoom(
       f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
     )
 
-    ffmpeg_path = os.path.expandvars(
-        r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe"
-    )
+    ffmpeg_path = ffmpeg_utils.get_ffmpeg_exe()
     cmd = [
       ffmpeg_path,
       "-i", input_path,
       "-vf", filter_cx,
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "22",
       "-c:a", "copy",
+      "-movflags", "+faststart",
       output_path, "-y"
     ]
-    
+
     result = subprocess.run(cmd, capture_output=True)
-    
+
     if os.path.exists(cmd_file):
         os.remove(cmd_file)
 
     if result.returncode != 0:
         logger.error(f"FFmpeg dynamic sendcmd reframe failed: {result.stderr.decode()}")
         return False, overall_face_count
-        
+
     return True, overall_face_count
 
 
@@ -390,25 +458,30 @@ async def _reframe_static_fallback(
   face_data: list[list[dict]]
 ) -> None:
   """
-  Fallback static crop in case dynamic sendcmd fails.
+  Fallback static crop with cinematic eye-level composition.
   """
   all_faces = [f for sec_data in face_data for f in sec_data]
-  
+
   if not all_faces:
       avg_cx = vid_width / 2.0
+      avg_cy = vid_height / 2.0
   else:
       avg_cx = sum(f['cx'] for f in all_faces) / len(all_faces)
-      
-  crop_h = vid_height
+      avg_cy = sum(f['cy'] for f in all_faces) / len(all_faces)
+
+  crop_h = float(vid_height)
   crop_w = crop_h * 9.0 / 16.0
-  
+
   if crop_w > vid_width:
-      crop_w = vid_width
+      crop_w = float(vid_width)
       crop_h = crop_w * 16.0 / 9.0
 
   crop_x = avg_cx - crop_w / 2.0
   crop_x = max(0.0, min(crop_x, float(vid_width) - crop_w))
-  crop_y = (vid_height - crop_h) / 2.0
+
+  # Cinematic Eye-Level vertical framing
+  crop_y = avg_cy - crop_h * 0.38
+  crop_y = max(0.0, min(crop_y, float(vid_height) - crop_h))
 
   filter_cx = (
       f"crop={int(crop_w)}:{int(crop_h)}:{int(crop_x)}:{int(crop_y)},"
@@ -416,13 +489,16 @@ async def _reframe_static_fallback(
       f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
   )
 
-  ffmpeg_path = os.path.expandvars(
-      r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe"
-  )
+  ffmpeg_path = ffmpeg_utils.get_ffmpeg_exe()
   cmd = [
     ffmpeg_path, "-i", input_path,
     "-vf", filter_cx,
-    "-c:a", "copy", output_path, "-y"
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "22",
+    "-c:a", "copy",
+    "-movflags", "+faststart",
+    output_path, "-y"
   ]
   result = subprocess.run(cmd, capture_output=True)
   if result.returncode != 0:
@@ -435,9 +511,7 @@ def _get_video_dimensions(video_path: str) -> tuple[int, int]:
   """
   Use ffprobe to get width and height.
   """
-  ffprobe_path = os.path.expandvars(
-      r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffprobe.exe"
-  )
+  ffprobe_path = ffmpeg_utils.get_ffprobe_exe()
   cmd = [
       ffprobe_path, 
       "-v", "error", "-select_streams", "v:0", 
@@ -460,9 +534,7 @@ async def _cut_raw_clip(
   ffmpeg -ss {start} -i {video_path} ...
   """
   duration = end - start
-  ffmpeg_path = os.path.expandvars(
-      r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe"
-  )
+  ffmpeg_path = ffmpeg_utils.get_ffmpeg_exe()
   cmd = [
       ffmpeg_path, "-y", "-ss", str(start), "-i", video_path,
       "-t", str(duration), "-c", "copy", output_path

@@ -48,7 +48,7 @@ load_dotenv()
 import os
 # Ensure ffmpeg is available to all subprocesses (Linux/Replit paths)
 _extra_paths = os.path.join(os.path.dirname(__file__), "bin")
-os.environ["PATH"] = _extra_paths + ":" + os.environ.get("PATH", "")
+os.environ["PATH"] = _extra_paths + os.pathsep + os.environ.get("PATH", "")
 
 # Internal modules
 import database  # type: ignore
@@ -85,6 +85,8 @@ app = FastAPI(
 _allowed_origins = [
     "http://localhost:3000",
     "http://localhost:5000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5000",
 ]
 _replit_domain = os.environ.get("REPLIT_DEV_DOMAIN")
 if _replit_domain:
@@ -93,7 +95,7 @@ if _replit_domain:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
-    allow_origin_regex=r"https://.*\.replit\.dev",
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?|https://.*\.replit\.dev",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -184,6 +186,7 @@ class ClipResponse(BaseModel):
     reframed: bool
     captioned: bool
     title: Optional[str] = None
+    description: Optional[str] = None
     reason: Optional[str] = None
     layout_mode: Optional[str] = None
     needs_user_confirm: bool = False
@@ -350,12 +353,22 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
             filename = os.path.basename(clip["file_path"])
             file_url = f"/files/{project_id}/clips/{filename}"
 
+            raw_desc = suggestion.get("description")
+            if not raw_desc:
+                raw_desc = f"{clip.get('title', '')}\n\n{clip.get('reason', '')}"
+            tags_list = suggestion.get("hashtags", [])
+            ht_clean = [h if h.startswith("#") else f"#{h}" for h in tags_list] if tags_list else ["#shorts", "#reels", "#fyp", "#viral"]
+            hashtags_str = " ".join(ht_clean)
+            credit_line = f"🎥 Credit Video: {title}\n🔗 Source: {youtube_url}"
+            full_social_description = f"{raw_desc.strip()}\n\n---\n{credit_line}\n\n{hashtags_str}"
+
             await database.save_clip(
                 project_id=project_id,
                 file_path=file_url,
                 start_time=clip["start_time"],
                 end_time=clip["end_time"],
                 title=clip.get("title"),
+                description=full_social_description,
                 reason=clip.get("reason"),
                 viral_score=clip.get("viral_score"),
                 face_count=clip.get("face_count"),
@@ -372,7 +385,7 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
 
     except Exception as exc:
         import traceback
-        with open("error_trace.txt", "w") as f:
+        with open("error_trace.txt", "w", encoding="utf-8") as f:
             f.write(traceback.format_exc())
             
         logger.exception("Pipeline failed for project %s", project_id)
